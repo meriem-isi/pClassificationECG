@@ -1,47 +1,92 @@
 from numpy import save
 import csv
-from keras.models import load_model
+#from keras.models import load_model
 from scipy import io
-import help1 as pc
-import ecg_plot
+#import help1 as pc
+#import ecg_plot
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
 import tensorflow as tf
 from tensorflow import keras
-from keras.utils import plot_model
-from keras.preprocessing.sequence import pad_sequences
-from keras import layers
-from keras.layers import Input, Dense, Dropout, Activation, BatchNormalization, Add
-from keras.layers import Conv1D, GlobalAveragePooling1D, MaxPool1D, ZeroPadding1D, LSTM, Bidirectional
-from keras.models import Sequential, Model
-from keras.utils import plot_model
+from sklearn.preprocessing import LabelEncoder
+from sklearn.model_selection import StratifiedKFold
+
+from tensorflow.keras.preprocessing.sequence import pad_sequences
+
+from tensorflow.keras.layers import Input, Dense, Dropout, Activation, BatchNormalization, Add
+from tensorflow.keras.layers import Conv1D, GlobalAveragePooling1D, MaxPool1D, ZeroPadding1D, LSTM, Bidirectional
+from tensorflow.keras.models import Sequential, Model
+
 import matplotlib.pyplot as plt
 from sklearn.metrics import confusion_matrix
-from keras.layers.merge import concatenate
+#from tensorflow.keras.layers.merge import concatenate
 from scipy import optimize
 from scipy.io import loadmat
 import os
-
-labels, ecg_filenames = pc.import_key_data("Training_2/")
-ecg_filenames = np.asarray(ecg_filenames)
-SNOMED_scored=pd.read_csv("physionet-snomed-mappings/SNOMED_mappings_scored.csv", sep=";")
-
-SNOMED_unscored=pd.read_csv("physionet-snomed-mappings/SNOMED_mappings_unscored.csv", sep=";")
-df_labels = pc.make_undefined_class(labels,SNOMED_unscored)
-y , snomed_classes = pc.onehot_encode(df_labels)
-y_all_comb = pc.get_labels_for_all_combinations(y)
-print("Total number of unique combinations of diagnosis+:+ {}".format(len(np.unique(y_all_comb))))
-folds = pc.split_data(labels, y_all_comb)
-
-order_array = folds[0][0]
+from scipy import signal
+import tqdm
 
 
-def shuffle_batch_generator(batch_size, gen_x, gen_y):
+def import_key_data(path):
+  gender=[]
+  age=[]
+  labels=[]
+  ecg_filenames=[]
+  for ecgfilename in tqdm.tqdm(sorted(os.listdir(path))):
+      if ecgfilename.endswith(".mat"):
+          data, header_data = load_challenge_data(path+ecgfilename)
+          labels.append(header_data[15][5:-1])
+          ecg_filenames.append(path+ecgfilename)
+          gender.append(header_data[14][6:-1])
+          age.append(header_data[13][6:-1])
+  return gender, age, labels, ecg_filenames
+
+def load_header(header_file):
+    with open(header_file, 'r') as f:
+        header = f.read()
+    return header
+
+def get_labels(header):
+    labels = list()
+    for l in header.split('\n'):
+        if l.startswith('#Dx'):
+            try:
+                entries = l.split(': ')[1].split(',')
+                for entry in entries:
+                    labels.append(entry.strip())
+            except:
+                pass
+    return labels
+    
+def is_integer(x):
+    if is_number(x):
+        return float(x).is_integer()
+    else:
+        return False
+        
+def is_number(x):
+  try:
+      float(x)
+      return True
+  except (ValueError, TypeError):
+      return False
+
+def split_data(labels, y_all_comb):
+    folds = list(StratifiedKFold(n_splits=10, shuffle=True, random_state=42).split(labels,y_all_comb))
+    print("Training split: {}".format(len(folds[0][0])))
+    print("Validation split: {}".format(len(folds[0][1])))
+    return folds
+
+def get_labels_for_all_combinations(y):
+    y_all_combinations = LabelEncoder().fit_transform([''.join(str(l)) for l in y])
+    return y_all_combinations
+
+def shuffle_batch_generator(batch_size, gen_x, gen_y, num_classes):
     np.random.shuffle(order_array)
     batch_features = np.zeros((batch_size, 5000, 12))
-    batch_labels = np.zeros((batch_size, snomed_classes.shape[0]))  # drop undef class
+    batch_labels = np.zeros((batch_size, num_classes))  # drop undef class
     while True:
         for i in range(batch_size):
             #next(input):générer les batches aléatoires
@@ -62,22 +107,37 @@ def generate_X_shuffle(X_train):
     while True:
         for i in order_array:
             # if filepath.endswith(".mat"):
-            data, header_data = pc.load_challenge_data(X_train[i])
+            data, header_data = load_challenge_data(X_train[i])
+            if int(header_data[0].split(" ")[2]) != 500:
+              data_new = np.ones([12,int((int(header_data[0].split(" ")[3])/int(header_data[0].split(" ")[2]))*500)])
+              for i,j in enumerate(data):
+                  data_new[i] = signal.resample(j, int((int(header_data[0].split(" ")[3])/int(header_data[0].split(" ")[2]))*500))
+              data = data_new
             X_train_new = pad_sequences(data, maxlen=5000, truncating='post', padding="post")
             X_train_new = X_train_new.reshape(5000, 12)
             yield X_train_new
 ###################################################################################################################################
 
 reduce_lr = tf.keras.callbacks.ReduceLROnPlateau(
-    monitor='val_AUC', factor=0.1, patience=1, verbose=1, mode='max',
+    monitor='val_accuracy', factor=0.1, patience=1, verbose=1, mode='max',
     min_delta=0.0001, cooldown=0, min_lr=0
 )
 
-early_stop = tf.keras.callbacks.EarlyStopping(monitor='val_AUC', mode='max', verbose=1, patience=2)
+early_stop = tf.keras.callbacks.EarlyStopping(monitor='val_accuracy', mode='max', verbose=1, patience=2)
+
+def compute_accuracy(labels, outputs):
+    num_recordings, num_classes = np.shape(labels)
+
+    num_correct_recordings = 0
+    for i in range(num_recordings):
+        if np.all(labels[i, :]==outputs[i, :]):
+            num_correct_recordings += 1
+
+    return float(num_correct_recordings) / float(num_recordings)
 
 
 def thr_chall_metrics(thr, label, output_prob):
-    return -pc.compute_challenge_metric_for_opt(label, np.array(output_prob > thr))
+    return -compute_accuracy(labels, (output_prob >= thr))
 
 
 def load_challenge_data(filename):
@@ -91,19 +151,46 @@ def load_challenge_data(filename):
 
 
 def generate_validation_data(ecg_filenames, y, test_order_array):
-    y_train_gridsearch = y[test_order_array]
-    ecg_filenames_train_gridsearch = ecg_filenames[test_order_array]
+    y_val=y[test_order_array]
+    ecg_filenames_val=ecg_filenames[test_order_array]
+    all_ecgs=[]
+    for names in ecg_filenames_val:
+        data,header_data= load_challenge_data(names)
 
-    ecg_train_timeseries = []
-    for names in ecg_filenames_train_gridsearch:
-        data, header_data = load_challenge_data(names)
-        data = pad_sequences(data, maxlen=5000, truncating='post', padding="post")
-        ecg_train_timeseries.append(data)
-    X_train_gridsearch = np.asarray(ecg_train_timeseries)
+        if int(header_data[0].split(" ")[2]) != 500:
+            data_new = np.ones([12,int((int(header_data[0].split(" ")[3])/int(header_data[0].split(" ")[2]))*500)])
+            for i,j in enumerate(data):
+                data_new[i] = signal.resample(j, int((int(header_data[0].split(" ")[3])/int(header_data[0].split(" ")[2]))*500))
+            data = data_new
+        data = pad_sequences(data, maxlen=5000, truncating='post',padding="post")
 
-    X_train_gridsearch = X_train_gridsearch.reshape(ecg_filenames_train_gridsearch.shape[0], 5000, 12)
+        data = data.reshape(data.shape[1],data.shape[0])
+        all_ecgs.append(data)
+    all_ecgs = np.asarray(all_ecgs)
 
-    return X_train_gridsearch, y_train_gridsearch
+    return all_ecgs, y_val
+
+
+def pred_batch_generator(batch_size, gen_x): 
+    batch_features = np.zeros((batch_size,5000, 12))
+    while True:
+        for i in range(batch_size):
+            batch_features[i] = next(gen_x)
+        yield batch_features   
+
+
+def generate_X_pred(X_train_file, val_index):
+    while True:
+        for i in val_index:
+          data, header_data = load_challenge_data(X_train_file[i])
+          if int(header_data[0].split(" ")[2]) != 500:
+              data_new = np.ones([12,int((int(header_data[0].split(" ")[3])/int(header_data[0].split(" ")[2]))*500)])
+              for i,j in enumerate(data):
+                  data_new[i] = signal.resample(j, int((int(header_data[0].split(" ")[3])/int(header_data[0].split(" ")[2]))*500))
+              data = data_new
+          data = pad_sequences(data, maxlen=5000, truncating='post',padding="post")
+          data = data.reshape(data.shape[1],data.shape[0])
+          yield data
 ####################################################################################################""""
 
 def compute_modified_confusion_matrix(labels, outputs):
@@ -139,6 +226,64 @@ def plot_normalized_conf_matrix_dev(y_pred, ecg_filenames, y, val_fold, threshol
 
 ###############################################################################################
 
+print("type in your data path:")
+path1 = input()
+print("type in the path to the SNOMED files")
+path2 = input()
+gender, age, labels, ecg_filenames = import_key_data(path1)
+ecg_filenames = np.asarray(ecg_filenames)
+
+classes = set()
+for ecg_file in tqdm.tqdm(ecg_filenames):
+  header_file = ecg_file.replace('.mat','.hea')
+  header = load_header(header_file)
+  classes |= set(get_labels(header))
+if all(is_integer(x) for x in classes):
+    classes = sorted(classes, key=lambda x: int(x)) # Sort classes numerically if numbers.
+else:
+    classes = sorted(classes) # Sort classes alphanumerically if not numbers.
+num_classes = len(classes)
+
+
+SNOMED_scored=pd.read_csv(path2, sep=",")
+lab_arr = np.asarray(SNOMED_scored['SNOMED CT Code'], dtype="str")
+scored_classes = []
+for i in classes:
+  for j in lab_arr:
+    if i == '':
+      continue
+    if i == j:
+      scored_classes.append(i)
+scored_classes = sorted(scored_classes)
+
+
+num_recordings = len(ecg_filenames)
+num_classes = len(scored_classes)
+labels = np.zeros((num_recordings, num_classes), dtype=np.bool) # One-hot encoding of classes
+
+for i in tqdm.tqdm(range(len(ecg_filenames))):
+  current_labels = get_labels(load_header(ecg_filenames[i].replace('.mat','.hea')))
+  for label in current_labels:
+      if label in scored_classes:
+          j = scored_classes.index(label)
+          labels[i, j] = 1
+labels = labels *1
+labels = np.asarray(labels)
+
+y_all_comb = get_labels_for_all_combinations(labels)
+print("Total number of unique combinations of diagnosis+:+ {}".format(len(np.unique(y_all_comb))))
+
+folds = split_data(labels, y_all_comb)
+
+#df_labels = pc.make_undefined_class(labels,SNOMED_unscored)
+#y , snomed_classes = pc.onehot_encode(df_labels)
+#y_all_comb = pc.get_labels_for_all_combinations(y)
+
+#folds = pc.split_data(labels, y_all_comb)
+
+order_array = folds[0][0]
+
+
 lenet_5_model=Sequential()
 
 lenet_5_model.add(Conv1D(filters=6, kernel_size=3, padding='same', input_shape=(5000,12)))
@@ -157,35 +302,27 @@ lenet_5_model.add(Dense(64, activation='relu'))
 
 lenet_5_model.add(Dense(32, activation='relu'))
 
-lenet_5_model.add(Dense(27, activation = 'sigmoid'))
+lenet_5_model.add(Dense(num_classes, activation = 'sigmoid'))
 
 lenet_5_model.compile(loss=tf.keras.losses.BinaryCrossentropy(), optimizer=tf.keras.optimizers.Adam(learning_rate=0.001), metrics=[tf.keras.metrics.BinaryAccuracy(
-        name='accuracy', dtype=None, threshold=0.5),tf.keras.metrics.Recall(name='Recall'),tf.keras.metrics.Precision(name='Precision'),
-                    tf.keras.metrics.AUC(
-        num_thresholds=200,
-        curve="ROC",
-        summation_method="interpolation",
-        name="AUC",
-        dtype=None,
-        thresholds=None,
-        multi_label=True,
-        label_weights=None,
-    )])
+        name='accuracy', dtype=None, threshold=0.5)])
 lenet_5_model.summary()
 
 batchsize = 10
 
-#lenet_5_model.fit(x=shuffle_batch_generator(batch_size=batchsize, gen_x=generate_X_shuffle(ecg_filenames), gen_y=generate_y_shuffle(y)), epochs=10, steps_per_epoch=(len(order_array)/(batchsize*10)), validation_data=pc.generate_validation_data(ecg_filenames,y,folds[0][1]), callbacks=[reduce_lr,early_stop])
-
-#new_weights=pc.calculating_class_weights(y)
-
-#keys = np.arange(0,27,1)
-#weight_dictionary = dict(zip(keys, new_weights.T[1]))
+lenet_5_model.fit(x=shuffle_batch_generator(batch_size=batchsize, gen_x=generate_X_shuffle(ecg_filenames), gen_y=generate_y_shuffle(labels), num_classes=num_classes), epochs=10, steps_per_epoch=(len(order_array)/(batchsize*10)), 
+#validation_data=generate_validation_data(ecg_filenames,labels,folds[0][1]), callbacks=[reduce_lr,early_stop]
+)
+y_pred = lenet_5_model.predict(generate_validation_data(ecg_filenames,labels,folds[0][1])[0])
+print(f"Shape pred = {y_pred.shape}")
+print(f"Shape GT = {labels.shape}")
+#y_pred = lenet_5_model.predict_generator(pred_batch_generator(batch_size=batchsize, gen_x=generate_X_pred(ecg_filenames, folds[i][1])),steps=(len(folds[i][1])/batchsize))
+print(f"Accuracy = {compute_accuracy(labels[folds[0][1]],((y_pred >= 0.5) *1))}")
 
 lenet_5_model.save('models/cnnModel.h5')
 lenet_5_model.save_weights("models/cnn_weightsModel.h5")
 
-#y_pred = lenet_5_model.predict(x=pc.generate_validation_data(ecg_filenames,y,folds[0][1])[0])
+
 #init_thresholds = np.arange(0,1,0.05)
 
 #all_scores = pc.iterate_threshold(y_pred, ecg_filenames, y ,folds[0][1] )
