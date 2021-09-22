@@ -28,7 +28,7 @@ import os
 from scipy import signal
 import tqdm
 
-
+# import all filenames, labels, gender and age from the files in the directory
 def import_key_data(path):
   gender=[]
   age=[]
@@ -73,6 +73,7 @@ def is_number(x):
   except (ValueError, TypeError):
       return False
 
+# Split data using stratified CV to keep the same distribution in the training and test split
 def split_data(labels, y_all_comb):
     folds = list(StratifiedKFold(n_splits=10, shuffle=True, random_state=42).split(labels,y_all_comb))
     print("Training split: {}".format(len(folds[0][0])))
@@ -84,8 +85,11 @@ def get_labels_for_all_combinations(y):
     return y_all_combinations
 
 def shuffle_batch_generator(batch_size, gen_x, gen_y, num_classes):
+    # shuffle the order of the input data - order_array is a global variable
     np.random.shuffle(order_array)
-    batch_features = np.zeros((batch_size, 5000, 12))
+    # An empty array for the ECGs
+    batch_features = np.zeros((batch_size, 5000, 12))'
+    # An empty array for the labels
     batch_labels = np.zeros((batch_size, num_classes))  # drop undef class
     while True:
         for i in range(batch_size):
@@ -108,12 +112,15 @@ def generate_X_shuffle(X_train):
         for i in order_array:
             # if filepath.endswith(".mat"):
             data, header_data = load_challenge_data(X_train[i])
+            # if the sample frequenzy is not equal to 500Hz -> do up or down sampling to 500Hz
             if int(header_data[0].split(" ")[2]) != 500:
               data_new = np.ones([12,int((int(header_data[0].split(" ")[3])/int(header_data[0].split(" ")[2]))*500)])
               for i,j in enumerate(data):
                   data_new[i] = signal.resample(j, int((int(header_data[0].split(" ")[3])/int(header_data[0].split(" ")[2]))*500))
               data = data_new
+            # Pad or truncate the 500Hz signal to 5000 samples (equal to 10 sec)
             X_train_new = pad_sequences(data, maxlen=5000, truncating='post', padding="post")
+            # reshape to make the ECG signal fit into the model
             X_train_new = X_train_new.reshape(5000, 12)
             yield X_train_new
 ###################################################################################################################################
@@ -135,11 +142,11 @@ def compute_accuracy(labels, outputs):
 
     return float(num_correct_recordings) / float(num_recordings)
 
-
+# A prediction threshold optimization algorithm - often used in imbalanced multi-label classifications 
 def thr_chall_metrics(thr, label, output_prob):
     return -compute_accuracy(labels, (output_prob >= thr))
 
-
+# Load ECG and meta data using filename
 def load_challenge_data(filename):
     x = loadmat(filename)
     data = np.asarray(x['val'], dtype=np.float64)
@@ -151,19 +158,24 @@ def load_challenge_data(filename):
 
 
 def generate_validation_data(ecg_filenames, y, test_order_array):
+    # add labels for test data to y_val
     y_val=y[test_order_array]
+    # add ECG filenames for test data to ecg_filenames_val
     ecg_filenames_val=ecg_filenames[test_order_array]
+    # make a list to store all loaded test ECGs
     all_ecgs=[]
     for names in ecg_filenames_val:
+        # load ECG into data and meta data to header_data
         data,header_data= load_challenge_data(names)
-
+        # if the sample frequenzy is not equal to 500Hz -> do up or down sampling to 500Hz
         if int(header_data[0].split(" ")[2]) != 500:
             data_new = np.ones([12,int((int(header_data[0].split(" ")[3])/int(header_data[0].split(" ")[2]))*500)])
             for i,j in enumerate(data):
                 data_new[i] = signal.resample(j, int((int(header_data[0].split(" ")[3])/int(header_data[0].split(" ")[2]))*500))
             data = data_new
+        # Pad or truncate the 500Hz signal to 5000 samples (equal to 10 sec)
         data = pad_sequences(data, maxlen=5000, truncating='post',padding="post")
-
+        # reshape to make the ECG signal fit into the model
         data = data.reshape(data.shape[1],data.shape[0])
         all_ecgs.append(data)
     all_ecgs = np.asarray(all_ecgs)
@@ -182,13 +194,17 @@ def pred_batch_generator(batch_size, gen_x):
 def generate_X_pred(X_train_file, val_index):
     while True:
         for i in val_index:
+          # load ECG into data and meta data to header_data
           data, header_data = load_challenge_data(X_train_file[i])
+          # if the sample frequenzy is not equal to 500Hz -> do up or down sampling to 500Hz
           if int(header_data[0].split(" ")[2]) != 500:
               data_new = np.ones([12,int((int(header_data[0].split(" ")[3])/int(header_data[0].split(" ")[2]))*500)])
               for i,j in enumerate(data):
                   data_new[i] = signal.resample(j, int((int(header_data[0].split(" ")[3])/int(header_data[0].split(" ")[2]))*500))
               data = data_new
+          # Pad or truncate the 500Hz signal to 5000 samples (equal to 10 sec)
           data = pad_sequences(data, maxlen=5000, truncating='post',padding="post")
+          # reshape to make the ECG signal fit into the model
           data = data.reshape(data.shape[1],data.shape[0])
           yield data
 ####################################################################################################""""
